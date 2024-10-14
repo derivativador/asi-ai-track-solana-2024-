@@ -1,0 +1,128 @@
+from uagents import Context, Model, Protocol 
+from ai_engine import UAgentResponse, UAgentResponseType
+import requests
+from datetime import datetime
+
+# Define the protocol 'checknft'
+checknft = Protocol(name="checknft", version="1.3") 
+
+# Model for user input containing Solana wallet address
+class Request(Model):
+    solana_wallet_address: str
+    fetch_wallet_address: str
+
+@checknft.on_message(model=Request, replies={UAgentResponse})
+async def handle_message(ctx: Context, sender: str, msg: Request):
+    solana_wallet_address = msg.solana_wallet_address
+    fetch_wallet_address = msg.fetch_wallet_address
+
+    ctx.logger.info(f"Received Solana wallet address: {solana_wallet_address}")
+    ctx.logger.info(f"Received Fetch wallet address: {fetch_wallet_address}")
+
+    try:
+        # Fetch NFTs owned by the Solana wallet
+        nfts = get_nfts(solana_wallet_address)
+        nft_summary = create_nft_summary(nfts)
+        
+        # Calculate the total number of NFTs
+        total_nfts = len(nfts)
+        
+        # Calculate the total value of NFTs in SOL
+        total_nft_value_sol = sum([nft['price'] for nft in nfts if nft['price'] != "N/A"])
+        
+        # Fetch the current price of SOL in USD from CoinGecko
+        sol_price_usd = get_sol_price_usd()
+
+        # Calculate total value in USD
+        total_value_usd = total_nft_value_sol * sol_price_usd
+
+        # Get the current date and time (Month in full, day, year, and time)
+        current_datetime = datetime.now().strftime("%B %d, %Y %H:%M:%S")
+
+        response_message = (
+            f"NFTs Summary for {solana_wallet_address}:\n" 
+            + nft_summary + "\n\n"
+            + f"Total NFTs: {total_nfts}\n"
+            + f"Total NFT Value: {total_nft_value_sol:.2f} SOL\n"
+            + f"Current SOL Price: ${sol_price_usd:.2f} USD\n"
+            + f"Total Collection Value: ${total_value_usd:.2f} USD\n"
+            + f"Date: {current_datetime}"
+        )
+
+        # Send message to Fetch wallet
+        await ctx.send_wallet_message(fetch_wallet_address, response_message)
+
+        # Send message back to DeltaV (or the current sender session)
+        await ctx.send(
+            sender,
+            UAgentResponse(
+                message=response_message,
+                type=UAgentResponseType.FINAL
+            )
+        )
+
+    except Exception as e:
+        error_message = f"An error occurred: {str(e)}"
+        ctx.logger.error(error_message)
+
+        # Send error message to both wallet and sender
+        await ctx.send(
+            sender,
+            UAgentResponse(
+                message=error_message,
+                type=UAgentResponseType.ERROR
+            )
+        )
+        await ctx.send_wallet_message(fetch_wallet_address, error_message)
+
+# Function to fetch NFTs using Magic Eden API
+def get_nfts(wallet_address):
+    MAGICEDEN_NFTS_URL = f'https://api-mainnet.magiceden.dev/v2/wallets/{wallet_address}/tokens'
+    response = requests.get(MAGICEDEN_NFTS_URL)
+    if response.status_code == 200:
+        nfts = response.json()
+        # Fetch additional details for each NFT, such as current price
+        return [
+            {
+                "name": nft.get("name", "Unknown NFT"),
+                "mintAddress": nft.get("mintAddress"),
+                "price": get_nft_price(nft.get("mintAddress"))  # Fetching price
+            }
+            for nft in nfts
+        ]
+    return []
+
+# Function to get the price of an individual NFT
+def get_nft_price(mint_address):
+    MAGICEDEN_PRICE_URL = f'https://api-mainnet.magiceden.dev/v2/tokens/{mint_address}/listings'
+    response = requests.get(MAGICEDEN_PRICE_URL)
+    if response.status_code == 200:
+        listings = response.json()
+        if listings:
+            # Get the lowest price from available listings (floor price)
+            return min([listing["price"] for listing in listings if "price" in listing], default="N/A")
+    return "N/A"
+
+# Function to summarize NFT data in a more organized format
+def create_nft_summary(nfts):
+    if not nfts:
+        return "No NFTs found for the provided Solana wallet address."
+    
+    summary = []
+    for nft in nfts:
+        summary.append(f"Name: {nft['name']}\nPrice: {nft['price']} SOL\nMint Address: {nft['mintAddress']}\n")
+    
+    return "\n".join(summary)
+
+# Function to get the current price of SOL in USD using the CoinGecko API
+def get_sol_price_usd():
+    COINGECKO_API_URL = "https://api.coingecko.com/api/v3/simple/price"
+    params = {
+        "ids": "solana",
+        "vs_currencies": "usd"
+    }
+    response = requests.get(COINGECKO_API_URL, params=params)
+    if response.status_code == 200:
+        data = response.json()
+        return data.get("solana", {}).get("usd", 0)
+    return 0  # Return 0 if the price is not available
